@@ -80,17 +80,44 @@ query = st.text_input("Search anything (semantic search)")
 if query:
     query_vec = get_embedding(query)
 
-    D, I = index.search(np.array([query_vec]), k=5)
+    D, I = index.search(np.array([query_vec]), k=10)
 
-    st.subheader("Results")
+    file_best = {}
+    query_lower = query.lower()
 
     for i, idx in enumerate(I[0]):
         if idx < len(metadata):
             file_data = metadata[idx]
-            score = D[0][i]
+            base_score = D[0][i]
 
-            st.write(f"📄 {file_data['file']}")
-            st.caption(f"Score: {score:.4f}")
+            text = file_data['text'].lower()
 
-            # Preview snippet
-            st.caption(file_data['text'][:200] + "...")
+            # Keyword bonus
+            keyword_bonus = 0
+            for word in query_lower.split():
+                if word in text:
+                    keyword_bonus -= 0.05
+
+            final_score = base_score + keyword_bonus
+
+            file_name = file_data["file"]
+
+            # Keep only best chunk per file
+            if file_name not in file_best or final_score < file_best[file_name]["score"]:
+                file_best[file_name] = {
+                    "file": file_name,
+                    "text": file_data["text"],
+                    "score": final_score
+                }
+
+    # Convert to list and sort
+    results = list(file_best.values())
+    results = sorted(results, key=lambda x: x["score"])
+
+    st.subheader("Results")
+
+    for res in results[:5]:
+        st.write(f"📄 {res['file']}")
+        st.caption(f"Score: {res['score']:.4f}")
+        st.caption(res['text'][:200] + "...")
+        st.markdown("---")

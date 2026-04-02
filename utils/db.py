@@ -17,7 +17,7 @@ def load_index():
         metadata = []
 
     return index, metadata
-# drdt
+
 
 def save_index(index, metadata):
     faiss.write_index(index, INDEX_PATH)
