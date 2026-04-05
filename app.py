@@ -10,6 +10,7 @@ from utils.db import load_index, save_index, add_to_index
 def get_file_hash(file_bytes):
     return hashlib.md5(file_bytes).hexdigest()
 
+
 # Chunking helper
 def chunk_text(text, chunk_size=300, overlap=50):
     chunks = []
@@ -20,6 +21,16 @@ def chunk_text(text, chunk_size=300, overlap=50):
         chunks.append(chunk)
         start += chunk_size - overlap
     return chunks
+
+import re
+
+# Highlight helper
+def highlight_text(text, query):
+    words = query.split()
+    for word in words:
+        pattern = re.compile(f"({word})", re.IGNORECASE)
+        text = pattern.sub(r"**\1**", text)
+    return text
 
 # Ensure folders exist
 os.makedirs("uploads", exist_ok=True)
@@ -119,5 +130,7 @@ if query:
     for res in results[:5]:
         st.write(f"📄 {res['file']}")
         st.caption(f"Score: {res['score']:.4f}")
-        st.caption(res['text'][:200] + "...")
+        preview = res['text'][:200]
+        highlighted = highlight_text(preview, query)
+        st.markdown(highlighted + "...")
         st.markdown("---")
