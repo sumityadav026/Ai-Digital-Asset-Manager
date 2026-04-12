@@ -77,6 +77,7 @@ if uploaded_file:
 
             for chunk in chunks:
                 embedding = get_embedding(chunk)
+                embedding = embedding / (np.linalg.norm(embedding) + 1e-10)
                 add_to_index(index, metadata, embedding, uploaded_file.name, chunk, file_hash)
 
             save_index(index, metadata)
@@ -90,6 +91,7 @@ query = st.text_input("Search anything (semantic search)")
 
 if query:
     query_vec = get_embedding(query)
+    query_vec = query_vec / (np.linalg.norm(query_vec) + 1e-10)
 
     D, I = index.search(np.array([query_vec]), k=10)
 
