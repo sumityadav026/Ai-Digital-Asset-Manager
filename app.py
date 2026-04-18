@@ -149,30 +149,36 @@ if question:
     q_vec = get_embedding(question)
     q_vec = q_vec / (np.linalg.norm(q_vec) + 1e-10)
 
-    D, I = index.search(np.array([q_vec]), k=5)
+    D, I = index.search(np.array([q_vec]), k=3)
 
     context = ""
     sources = []
+
+    query_words = question.lower().split()
 
     for idx in I[0]:
         if idx < len(metadata):
             text = metadata[idx]["text"]
             file = metadata[idx]["file"]
 
-            context += text + "\n"
+            text_lower = text.lower()
 
-            sources.append({
-                "file": file,
-                "text": text[:200]
-            })
+            # Only include chunks that actually match query keywords
+            if any(word in text_lower for word in query_words):
+                context += text + "\n"
+
+                sources.append({
+                    "file": file,
+                    "text": text[:200]
+                })
 
     client = Groq()
 
     try:
         response = client.chat.completions.create(
-            model="llama-3.1-8b-instant",
+            model="llama-3.3-70b-versatile",
             messages=[
-                {"role": "system", "content": "Answer only from the given context."},
+                {"role": "system", "content": "You are a strict document QA assistant. Answer ONLY using exact information from the provided context. Do NOT guess or infer. If the answer is not explicitly present, reply exactly: 'Not found in documents'."},
                 {"role": "user", "content": f"Context:\n{context}\n\nQuestion: {question}"}
             ]
         )
