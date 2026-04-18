@@ -3,6 +3,8 @@ import os
 import numpy as np
 import hashlib
 
+from groq import Groq
+
 from utils.extract import extract_text
 from utils.embeddings import get_embedding
 from utils.db import load_index, save_index, add_to_index
@@ -136,3 +138,54 @@ if query:
         highlighted = highlight_text(preview, query)
         st.markdown(highlighted + "...")
         st.markdown("---")
+
+
+# ---------------- CHAT WITH DOCUMENTS ----------------
+st.header("Chat with Documents")
+
+question = st.text_input("Ask something about your documents")
+
+if question:
+    q_vec = get_embedding(question)
+    q_vec = q_vec / (np.linalg.norm(q_vec) + 1e-10)
+
+    D, I = index.search(np.array([q_vec]), k=5)
+
+    context = ""
+    sources = []
+
+    for idx in I[0]:
+        if idx < len(metadata):
+            text = metadata[idx]["text"]
+            file = metadata[idx]["file"]
+
+            context += text + "\n"
+
+            sources.append({
+                "file": file,
+                "text": text[:200]
+            })
+
+    client = Groq()
+
+    try:
+        response = client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[
+                {"role": "system", "content": "Answer only from the given context."},
+                {"role": "user", "content": f"Context:\n{context}\n\nQuestion: {question}"}
+            ]
+        )
+
+        st.subheader("Answer")
+        st.write(response.choices[0].message.content)
+
+        st.subheader("Sources")
+
+        for src in sources:
+            st.write(f"📄 {src['file']}")
+            st.caption(src["text"])
+            st.markdown("---")
+
+    except Exception as e:
+        st.error("Something went wrong. Please try again.")
