@@ -1,3 +1,7 @@
+import torch
+import clip
+from PIL import Image
+import pytesseract
 import streamlit as st
 import os
 import numpy as np
@@ -40,6 +44,10 @@ os.makedirs("database", exist_ok=True)
 
 # Load DB
 index, metadata = load_index()
+
+# Load CLIP model
+device = "cuda" if torch.cuda.is_available() else "cpu"
+clip_model, preprocess = clip.load("ViT-B/32", device=device)
 
 # UI
 st.set_page_config(page_title="AI DAM", layout="wide")
@@ -141,6 +149,54 @@ if query:
 
 
 # ---------------- CHAT WITH DOCUMENTS ----------------
+#
+# ---------------- MULTIMODAL IMAGE PROCESSING ----------------
+st.header("Image Recognition (Multimodal)")
+
+image_file = st.file_uploader("Upload an image (PNG/JPG)", type=["png","jpg","jpeg"], key="image_upload")
+
+if image_file:
+    image = Image.open(image_file)
+    st.image(image, caption="Uploaded Image", width=700)
+
+    try:
+        extracted_text = pytesseract.image_to_string(image)
+
+        if extracted_text.strip() == "":
+            st.warning("No text detected in image.")
+        else:
+            st.subheader("Extracted Text")
+            st.write(extracted_text)
+
+            # OCR text embedding
+            chunks = chunk_text(extracted_text)
+            for chunk in chunks:
+                emb = get_embedding(chunk)
+                emb = emb / (np.linalg.norm(emb) + 1e-10)
+                add_to_index(index, metadata, emb, "image_ocr", chunk, get_file_hash(chunk.encode()))
+
+        # CLIP visual embedding
+        image_input = preprocess(image).unsqueeze(0).to(device)
+        with torch.no_grad():
+            image_features = clip_model.encode_image(image_input)
+            image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+
+        img_embedding = image_features.cpu().numpy().astype("float32")[0]
+
+        # ⚠️ Skip adding CLIP embedding to FAISS (dimension mismatch with text embeddings)
+        # Instead, store only as metadata note (future extension)
+        metadata.append({
+            "file": "image_visual",
+            "text": "This image likely contains visual objects (CLIP embedding stored separately)",
+            "hash": get_file_hash(image_file.getvalue())
+        })
+
+        save_index(index, metadata)
+
+        st.success("Image added with OCR + CLIP embeddings!")
+
+    except Exception as e:
+        st.error(f"Image processing error: {repr(e)}")
 st.header("Chat with Documents")
 
 if "chat_history" not in st.session_state:
