@@ -143,13 +143,18 @@ if query:
 # ---------------- CHAT WITH DOCUMENTS ----------------
 st.header("Chat with Documents")
 
-question = st.text_input("Ask something about your documents")
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
+
+question = st.text_input("Ask something about your documents", key="chat_input")
 
 if question:
     q_vec = get_embedding(question)
     q_vec = q_vec / (np.linalg.norm(q_vec) + 1e-10)
 
     D, I = index.search(np.array([q_vec]), k=3)
+
+    confidence_scores = []
 
     context = ""
     sources = []
@@ -172,26 +177,61 @@ if question:
                     "text": text[:200]
                 })
 
+                confidence_scores.append(float(D[0][list(I[0]).index(idx)]))
+
+    if context.strip() == "":
+        st.warning("No relevant information found in documents.")
+        st.stop()
+
+    api_key = os.getenv("GROQ_API_KEY")
+    if not api_key:
+        st.error("GROQ_API_KEY is not set. Please configure your API key.")
+        st.stop()
+
     client = Groq()
 
     try:
-        response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[
-                {"role": "system", "content": "You are a strict document QA assistant. Answer ONLY using exact information from the provided context. Do NOT guess or infer. If the answer is not explicitly present, reply exactly: 'Not found in documents'."},
-                {"role": "user", "content": f"Context:\n{context}\n\nQuestion: {question}"}
-            ]
-        )
+        with st.spinner("Thinking..."):
+            response = client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[
+                    {"role": "system", "content": "You are a strict document QA assistant. Answer ONLY using exact information from the provided context. Do NOT guess or infer. If the answer is not explicitly present, reply exactly: 'Not found in documents'."},
+                    {"role": "user", "content": f"Context:\n{context}\n\nQuestion: {question}"}
+                ]
+            )
+        answer_text = response.choices[0].message.content
+        st.session_state.chat_history.append((question, answer_text))
 
-        st.subheader("Answer")
-        st.write(response.choices[0].message.content)
+        col1, col2 = st.columns([2,1])
+
+        with col1:
+            st.subheader("Answer")
+            st.write(answer_text)
+
+        with col2:
+            if confidence_scores:
+                avg_score = sum(confidence_scores) / len(confidence_scores)
+                confidence = max(0, 1 - avg_score)
+                st.metric("Confidence", f"{confidence:.2f}")
+
+        st.markdown("### 📄 Sources Used")
 
         st.subheader("Sources")
 
         for src in sources:
             st.write(f"📄 {src['file']}")
-            st.caption(src["text"])
+            highlighted_text = highlight_text(src["text"], question)
+            st.markdown(highlighted_text)
+            st.markdown("---")
+
+        if confidence_scores:
+            st.caption(f"Confidence Score: {confidence:.2f}")
+
+        st.subheader("Chat History")
+        for q, a in reversed(st.session_state.chat_history[-5:]):
+            st.markdown(f"**Q:** {q}")
+            st.markdown(f"**A:** {a}")
             st.markdown("---")
 
     except Exception as e:
-        st.error("Something went wrong. Please try again.")
+        st.error(f"Error: {str(e)}")
