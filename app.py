@@ -175,21 +175,35 @@ if image_file:
                 emb = emb / (np.linalg.norm(emb) + 1e-10)
                 add_to_index(index, metadata, emb, "image_ocr", chunk, get_file_hash(chunk.encode()))
 
-        # CLIP visual embedding
+        # CLIP visual embedding + label conversion (RAG-ready)
         image_input = preprocess(image).unsqueeze(0).to(device)
+
+        labels = [
+            "car", "invoice", "receipt", "laptop", "mobile phone",
+            "document", "watch", "person", "screen", "vehicle"
+        ]
+
+        text_tokens = clip.tokenize(labels).to(device)
+
         with torch.no_grad():
             image_features = clip_model.encode_image(image_input)
             image_features = image_features / image_features.norm(dim=-1, keepdim=True)
 
-        img_embedding = image_features.cpu().numpy().astype("float32")[0]
+            text_features = clip_model.encode_text(text_tokens)
+            text_features = text_features / text_features.norm(dim=-1, keepdim=True)
 
-        # ⚠️ Skip adding CLIP embedding to FAISS (dimension mismatch with text embeddings)
-        # Instead, store only as metadata note (future extension)
-        metadata.append({
-            "file": "image_visual",
-            "text": "This image likely contains visual objects (CLIP embedding stored separately)",
-            "hash": get_file_hash(image_file.getvalue())
-        })
+            similarity = (image_features @ text_features.T).softmax(dim=-1)
+            best_idx = similarity.argmax().item()
+            best_label = labels[best_idx]
+
+        # Convert visual understanding into text for RAG
+        visual_text = f"This image contains: {best_label}"
+
+        # Embed and store in FAISS (now compatible)
+        emb = get_embedding(visual_text)
+        emb = emb / (np.linalg.norm(emb) + 1e-10)
+
+        add_to_index(index, metadata, emb, "image_visual", visual_text, get_file_hash(image_file.getvalue()))
 
         save_index(index, metadata)
 
