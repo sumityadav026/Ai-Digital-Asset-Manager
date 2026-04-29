@@ -1,307 +1,199 @@
+"""
+AI Digital Asset Manager (AI DAM)
+==================================
+Main entry point.
+
+Pages
+-----
+  Dashboard         — stats, quick search, document library
+  My Documents      — upload, browse, filter, per-doc actions
+  Search            — global semantic search with Chat CTA
+  Document Chat     — per-document dedicated chat interface
+  Image Recognition — CLIP label detection + Tesseract OCR
+  Settings          — API config, model info, rebuild instructions
+"""
+
+import os
+import logging
+
 import torch
 import clip
-from PIL import Image
-import pytesseract
 import streamlit as st
-import os
-import numpy as np
-import hashlib
 
-from groq import Groq
+from utils.db import load_index
+from utils.ui import inject_css, init_session_defaults, navigate_to, get_doc_list, PRIMARY, BORDER, TEXT_MUTED
 
-from utils.extract import extract_text
-from utils.embeddings import get_embedding
-from utils.db import load_index, save_index, add_to_index
+# Page modules
+import pages.dashboard as pg_dashboard
+import pages.documents as pg_documents
+import pages.search as pg_search
+import pages.doc_chat as pg_doc_chat
+import pages.image_recognition as pg_image
+import pages.settings as pg_settings
 
-def get_file_hash(file_bytes):
-    return hashlib.md5(file_bytes).hexdigest()
+logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(message)s")
+
+# ---------------------------------------------------------------------------
+# Page config — MUST be first Streamlit call
+# ---------------------------------------------------------------------------
+st.set_page_config(
+    page_title="AI Digital Asset Manager",
+    page_icon="📂",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+# ---------------------------------------------------------------------------
+# Inject CSS + initialise session state
+# ---------------------------------------------------------------------------
+inject_css()
+init_session_defaults()
+
+# ---------------------------------------------------------------------------
+# Heavy models — cached so they load only once per session
+# ---------------------------------------------------------------------------
+
+@st.cache_resource(show_spinner="Loading models…")
+def _load_models():
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    clip_model, preprocess = clip.load("ViT-B/32", device=device)
+    return clip_model, preprocess, device
 
 
-# Chunking helper
-def chunk_text(text, chunk_size=300, overlap=50):
-    chunks = []
-    start = 0
-    while start < len(text):
-        end = start + chunk_size
-        chunk = text[start:end]
-        chunks.append(chunk)
-        start += chunk_size - overlap
-    return chunks
+@st.cache_resource(show_spinner="Loading vector index…")
+def _load_index():
+    os.makedirs("uploads", exist_ok=True)
+    os.makedirs("database", exist_ok=True)
+    return load_index()
 
-import re
 
-# Highlight helper
-def highlight_text(text, query):
-    words = query.split()
-    for word in words:
-        pattern = re.compile(f"({word})", re.IGNORECASE)
-        text = pattern.sub(r"**\1**", text)
-    return text
+clip_model, preprocess, device = _load_models()
+index, metadata = _load_index()
 
-# Ensure folders exist
-os.makedirs("uploads", exist_ok=True)
-os.makedirs("database", exist_ok=True)
+# ---------------------------------------------------------------------------
+# Sidebar
+# ---------------------------------------------------------------------------
+with st.sidebar:
+    # Brand
+    st.markdown(f"""
+    <div style="display:flex;align-items:center;gap:0.6rem;padding:0.4rem 0 1.2rem;">
+      <div style="background:{PRIMARY};color:#fff;border-radius:10px;
+           width:36px;height:36px;display:flex;align-items:center;
+           justify-content:center;font-size:1.1rem;font-weight:700;
+           flex-shrink:0;">A</div>
+      <div>
+        <div style="font-weight:700;font-size:0.95rem;color:#1A1D23;line-height:1.1">AI DAM</div>
+        <div style="font-size:0.7rem;color:{TEXT_MUTED}">Digital Asset Manager</div>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
 
-# Load DB
-index, metadata = load_index()
+    # Doc count badge
+    doc_count = len(get_doc_list(metadata))
+    st.markdown(
+        f'<div style="font-size:0.72rem;color:{TEXT_MUTED};margin-bottom:0.8rem;">'
+        f'{doc_count} document{"s" if doc_count != 1 else ""} indexed</div>',
+        unsafe_allow_html=True,
+    )
 
-# Load CLIP model
-device = "cuda" if torch.cuda.is_available() else "cpu"
-clip_model, preprocess = clip.load("ViT-B/32", device=device)
+    # Nav items — (page_key, label, icon)
+    NAV = [
+        ("dashboard",  "Dashboard",         "◻"),
+        ("documents",  "My Documents",      "📄"),
+        ("search",     "Search",            "🔍"),
+        ("doc_chat",   "Document Chat",     "💬"),
+        ("image",      "Image Recognition", "🖼"),
+        ("settings",   "Settings",          "⚙"),
+    ]
 
-# UI
-st.set_page_config(page_title="AI DAM", layout="wide")
-st.title("📂 AI Digital Asset Manager")
+    current_page = st.session_state.page
 
-# ---------------- UPLOAD ----------------
-st.header("Upload File")
+    st.markdown(
+        '<div style="font-size:0.68rem;font-weight:600;text-transform:uppercase;'
+        f'letter-spacing:0.07em;color:{TEXT_MUTED};margin-bottom:0.4rem;">Navigation</div>',
+        unsafe_allow_html=True,
+    )
 
-uploaded_file = st.file_uploader("Upload PDF or DOCX")
+    # Inject per-button active styles via CSS class trick
+    st.markdown("""
+    <style>
+    div[data-testid="stSidebar"] .stButton > button {
+        width: 100%;
+        text-align: left;
+        padding: 0.45rem 0.75rem;
+        border-radius: 8px;
+        font-size: 0.875rem;
+        font-weight: 500;
+        border: none !important;
+        background: transparent !important;
+        color: #374151 !important;
+        box-shadow: none !important;
+    }
+    div[data-testid="stSidebar"] .stButton > button:hover {
+        background: #EEF1FD !important;
+        color: #4F6BED !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
 
-if uploaded_file:
-    file_bytes = uploaded_file.getbuffer()
-    file_hash = get_file_hash(file_bytes)
+    for page_key, label, icon in NAV:
+        is_active = current_page == page_key
 
-    # Check duplicates
-    existing_hashes = [item.get("hash") for item in metadata]
-
-    if file_hash in existing_hashes:
-        st.warning("⚠️ Duplicate file detected! Already uploaded.")
-    else:
-        file_path = os.path.join("uploads", uploaded_file.name)
-
-        # Save file
-        with open(file_path, "wb") as f:
-            f.write(file_bytes)
-
-        st.success("File uploaded!")
-
-        # Extract text
-        text = extract_text(file_path)
-
-        if text.strip() == "":
-            st.warning("No text found in file!")
+        if is_active:
+            # Active: render a styled HTML block + button on top
+            st.markdown(f"""
+            <div style="background:#EEF1FD;border-radius:8px;margin-bottom:2px;padding:0.45rem 0.75rem;
+                 display:flex;align-items:center;gap:0.5rem;font-size:0.875rem;font-weight:600;
+                 color:#4F6BED;">
+              <span>{icon}</span><span>{label}</span>
+              <span style="margin-left:auto;width:6px;height:6px;border-radius:50%;
+                   background:#4F6BED;display:inline-block;"></span>
+            </div>
+            """, unsafe_allow_html=True)
         else:
-            # Split into chunks
-            chunks = chunk_text(text)
+            if st.button(f"{icon}  {label}", key=f"nav_{page_key}", use_container_width=True):
+                st.session_state.page = page_key
+                st.rerun()
 
-            for chunk in chunks:
-                embedding = get_embedding(chunk)
-                embedding = embedding / (np.linalg.norm(embedding) + 1e-10)
-                add_to_index(index, metadata, embedding, uploaded_file.name, chunk, file_hash)
+    st.markdown(f'<hr style="border-color:{BORDER};margin:1rem 0">', unsafe_allow_html=True)
 
-            save_index(index, metadata)
+    # Quick upload in sidebar
+    st.markdown(
+        '<div style="font-size:0.68rem;font-weight:600;text-transform:uppercase;'
+        f'letter-spacing:0.07em;color:{TEXT_MUTED};margin-bottom:0.4rem;">Quick Upload</div>',
+        unsafe_allow_html=True,
+    )
+    quick_up = st.file_uploader(
+        "Quick upload",
+        type=["pdf", "docx"],
+        key="sidebar_upload",
+        label_visibility="collapsed",
+    )
+    if quick_up:
+        navigate_to("documents")
 
-            st.success(f"File processed & stored in {len(chunks)} chunks!")
+# ---------------------------------------------------------------------------
+# Main content — route to the active page
+# ---------------------------------------------------------------------------
+page = st.session_state.page
 
-# ---------------- SEARCH ----------------
-st.header("Search Files")
+if page == "dashboard":
+    pg_dashboard.render(metadata, index)
 
-query = st.text_input("Search anything (semantic search)")
+elif page == "documents":
+    pg_documents.render(metadata, index)
 
-if query:
-    query_vec = get_embedding(query)
-    query_vec = query_vec / (np.linalg.norm(query_vec) + 1e-10)
+elif page == "search":
+    pg_search.render(metadata, index)
 
-    D, I = index.search(np.array([query_vec]), k=10)
+elif page == "doc_chat":
+    pg_doc_chat.render(metadata, index)
 
-    file_best = {}
-    query_lower = query.lower()
+elif page == "image":
+    pg_image.render(metadata, index, clip_model, preprocess, device)
 
-    for i, idx in enumerate(I[0]):
-        if idx < len(metadata):
-            file_data = metadata[idx]
-            base_score = D[0][i]
+elif page == "settings":
+    pg_settings.render(metadata, index)
 
-            text = file_data['text'].lower()
-
-            # Keyword bonus
-            keyword_bonus = 0
-            for word in query_lower.split():
-                if word in text:
-                    keyword_bonus -= 0.05
-
-            final_score = base_score + keyword_bonus
-
-            file_name = file_data["file"]
-
-            # Keep only best chunk per file
-            if file_name not in file_best or final_score < file_best[file_name]["score"]:
-                file_best[file_name] = {
-                    "file": file_name,
-                    "text": file_data["text"],
-                    "score": final_score
-                }
-
-    # Convert to list and sort
-    results = list(file_best.values())
-    results = sorted(results, key=lambda x: x["score"])
-
-    st.subheader("Results")
-
-    for res in results[:5]:
-        st.write(f"📄 {res['file']}")
-        st.caption(f"Score: {res['score']:.4f}")
-        preview = res['text'][:200]
-        highlighted = highlight_text(preview, query)
-        st.markdown(highlighted + "...")
-        st.markdown("---")
-
-
-# ---------------- CHAT WITH DOCUMENTS ----------------
-#
-# ---------------- MULTIMODAL IMAGE PROCESSING ----------------
-st.header("Image Recognition (Multimodal)")
-
-image_file = st.file_uploader("Upload an image (PNG/JPG)", type=["png","jpg","jpeg"], key="image_upload")
-
-if image_file:
-    image = Image.open(image_file)
-    st.image(image, caption="Uploaded Image", width=700)
-
-    try:
-        extracted_text = pytesseract.image_to_string(image)
-
-        if extracted_text.strip() == "":
-            st.warning("No text detected in image.")
-        else:
-            st.subheader("Extracted Text")
-            st.write(extracted_text)
-
-            # OCR text embedding
-            chunks = chunk_text(extracted_text)
-            for chunk in chunks:
-                emb = get_embedding(chunk)
-                emb = emb / (np.linalg.norm(emb) + 1e-10)
-                add_to_index(index, metadata, emb, "image_ocr", chunk, get_file_hash(chunk.encode()))
-
-        # CLIP visual embedding + label conversion (RAG-ready)
-        image_input = preprocess(image).unsqueeze(0).to(device)
-
-        labels = [
-            "car", "invoice", "receipt", "laptop", "mobile phone",
-            "document", "watch", "person", "screen", "vehicle"
-        ]
-
-        text_tokens = clip.tokenize(labels).to(device)
-
-        with torch.no_grad():
-            image_features = clip_model.encode_image(image_input)
-            image_features = image_features / image_features.norm(dim=-1, keepdim=True)
-
-            text_features = clip_model.encode_text(text_tokens)
-            text_features = text_features / text_features.norm(dim=-1, keepdim=True)
-
-            similarity = (image_features @ text_features.T).softmax(dim=-1)
-            best_idx = similarity.argmax().item()
-            best_label = labels[best_idx]
-
-        # Convert visual understanding into text for RAG
-        visual_text = f"This image contains: {best_label}"
-
-        # Embed and store in FAISS (now compatible)
-        emb = get_embedding(visual_text)
-        emb = emb / (np.linalg.norm(emb) + 1e-10)
-
-        add_to_index(index, metadata, emb, "image_visual", visual_text, get_file_hash(image_file.getvalue()))
-
-        save_index(index, metadata)
-
-        st.success("Image added with OCR + CLIP embeddings!")
-
-    except Exception as e:
-        st.error(f"Image processing error: {repr(e)}")
-st.header("Chat with Documents")
-
-if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []
-
-question = st.text_input("Ask something about your documents", key="chat_input")
-
-if question:
-    q_vec = get_embedding(question)
-    q_vec = q_vec / (np.linalg.norm(q_vec) + 1e-10)
-
-    D, I = index.search(np.array([q_vec]), k=3)
-
-    confidence_scores = []
-
-    context = ""
-    sources = []
-
-    query_words = question.lower().split()
-
-    for idx in I[0]:
-        if idx < len(metadata):
-            text = metadata[idx]["text"]
-            file = metadata[idx]["file"]
-
-            text_lower = text.lower()
-
-            # Only include chunks that actually match query keywords
-            if any(word in text_lower for word in query_words):
-                context += text + "\n"
-
-                sources.append({
-                    "file": file,
-                    "text": text[:200]
-                })
-
-                confidence_scores.append(float(D[0][list(I[0]).index(idx)]))
-
-    if context.strip() == "":
-        st.warning("No relevant information found in documents.")
-        st.stop()
-
-    api_key = os.getenv("GROQ_API_KEY")
-    if not api_key:
-        st.error("GROQ_API_KEY is not set. Please configure your API key.")
-        st.stop()
-
-    client = Groq()
-
-    try:
-        with st.spinner("Thinking..."):
-            response = client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
-                messages=[
-                    {"role": "system", "content": "You are a strict document QA assistant. Answer ONLY using exact information from the provided context. Do NOT guess or infer. If the answer is not explicitly present, reply exactly: 'Not found in documents'."},
-                    {"role": "user", "content": f"Context:\n{context}\n\nQuestion: {question}"}
-                ]
-            )
-        answer_text = response.choices[0].message.content
-        st.session_state.chat_history.append((question, answer_text))
-
-        col1, col2 = st.columns([2,1])
-
-        with col1:
-            st.subheader("Answer")
-            st.write(answer_text)
-
-        with col2:
-            if confidence_scores:
-                avg_score = sum(confidence_scores) / len(confidence_scores)
-                confidence = max(0, 1 - avg_score)
-                st.metric("Confidence", f"{confidence:.2f}")
-
-        st.markdown("### 📄 Sources Used")
-
-        st.subheader("Sources")
-
-        for src in sources:
-            st.write(f"📄 {src['file']}")
-            highlighted_text = highlight_text(src["text"], question)
-            st.markdown(highlighted_text)
-            st.markdown("---")
-
-        if confidence_scores:
-            st.caption(f"Confidence Score: {confidence:.2f}")
-
-        st.subheader("Chat History")
-        for q, a in reversed(st.session_state.chat_history[-5:]):
-            st.markdown(f"**Q:** {q}")
-            st.markdown(f"**A:** {a}")
-            st.markdown("---")
-
-    except Exception as e:
-        st.error(f"Error: {str(e)}")
+else:
+    pg_dashboard.render(metadata, index)
