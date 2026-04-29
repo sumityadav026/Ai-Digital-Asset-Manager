@@ -33,6 +33,33 @@ import pages.settings as pg_settings
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(message)s")
 
+
+def _load_env() -> None:
+    """Auto-load variables from .env file or st.secrets so user never has to set it manually."""
+    env_path = os.path.join(os.path.dirname(__file__), ".env")
+    if os.path.exists(env_path):
+        try:
+            with open(env_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith("#") and "=" in line:
+                        k, v = line.split("=", 1)
+                        k, v = k.strip(), v.strip().strip("'\"")
+                        if k and k not in os.environ:
+                            os.environ[k] = v
+        except Exception:
+            pass
+
+    try:
+        if hasattr(st, "secrets") and "GROQ_API_KEY" in st.secrets:
+            if "GROQ_API_KEY" not in os.environ:
+                os.environ["GROQ_API_KEY"] = st.secrets["GROQ_API_KEY"]
+    except Exception:
+        pass
+
+
+_load_env()
+
 # ---------------------------------------------------------------------------
 # Page config — MUST be first Streamlit call
 # ---------------------------------------------------------------------------
